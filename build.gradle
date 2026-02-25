@@ -1,21 +1,22 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
-import net.minecraftforge.gradle.common.util.RunConfig
 
 import java.util.function.Consumer
 
 plugins {
-    id "com.github.johnrengelman.shadow" version "8.1.+"
-    id 'java'
-    id 'eclipse'
-    id 'idea'
-    id 'net.neoforged.gradle' version '[6.0.18,6.2)'
-    id 'org.parchmentmc.librarian.forgegradle' version '1.+'
+    id('java')
+    id('eclipse')
+    id('idea')
+    id('maven-publish')
+    id('com.gradleup.shadow') version('8.3.6')
+    // https://projects.neoforged.net/neoforged/ModDevGradle
+    id('net.neoforged.moddev.legacyforge') version('2.0.91')
 }
 
 tasks.named('wrapper', Wrapper).configure {
     //Define wrapper values here so as to not have to always do so when updating gradlew.properties
-    gradleVersion = '8.4'
+    gradleVersion = '8.12.1'
     distributionType = Wrapper.DistributionType.ALL
 }
 
@@ -59,21 +60,14 @@ sourceSets {
     }
 }
 
-def libraryConfigs = new HashSet<Configuration>()
 configurations { configContainer ->
-    sourceSets.each { sourceSet ->
-        def configName = sourceSet.getTaskName(null, "forgeLibrary")
-        def implementationConfigName = sourceSet.getTaskName(null, "implementation")
-        def libraryConfig = configContainer.maybeCreate(configName)
-        def implementationConfig = configContainer.maybeCreate(implementationConfigName)
-        implementationConfig.extendsFrom libraryConfig
-        libraryConfigs.add(libraryConfig)
-    }
     //Make sure all our sub source set stuff extends the proper base methods so that
     // they can see all the dependencies we have in dependencies including forge
     extendConfigurations(implementation, apiImplementation, testImplementation, datagenImplementation)
     extendConfigurations(compileOnly, apiCompileOnly, testCompileOnly, datagenCompileOnly)
     extendConfigurations(runtimeOnly, apiRuntimeOnly, datagenRuntimeOnly)
+    extendConfigurations(localRuntime, apiLocalRuntime)
+    sourceSets.main.runtimeClasspath += localRuntime
 }
 
 static void extendConfigurations(Configuration base, Configuration... configurations) {
@@ -83,15 +77,13 @@ static void extendConfigurations(Configuration base, Configuration... configurat
 }
 
 ext {
-    versionProperties = ["version"       : projecte_version, "mc_version": minecraft_version_range, "forge_version": forge_version_range,
+    versionProperties = ["version": projecte_version, "mc_version": minecraft_version_range, "forge_version": forge_version_range,
                          "loader_version": loader_version_range]
     jsonPatterns = ["**/*.json", "**/*.mcmeta"]
-    //Setup the UPDATE_SOURCESET property in case we are doing any remappings
-    UPDATE_SOURCESETS = project.sourceSets.collect { it.name }.join(';')
 }
 
 def replaceResources = tasks.register("replaceResources", Copy) {
-    it.outputs.upToDateWhen { false }
+    inputs.properties(versionProperties)
     def modsToml = copySpec {
         from(sourceSets.main.resources) {
             include "META-INF/mods.toml"
@@ -100,7 +92,7 @@ def replaceResources = tasks.register("replaceResources", Copy) {
     }
     //Copy it into the build dir
     it.with modsToml
-    it.into "$buildDir/resources/main/"
+    it.into layout.buildDirectory.dir('resources/main/')
     //If IntelliJ's output dir exists, copy it there as well
     if (new File("$rootDir/out/production/").exists()) {
         copy {
@@ -118,8 +110,8 @@ def replaceResources = tasks.register("replaceResources", Copy) {
 }
 
 version = "${projecte_version}"
-group = "java.moze_intel"
-archivesBaseName = "projecte"
+group = "moze_intel.projecte"
+project.base.archivesName = "projecte"
 
 java {
     toolchain {
@@ -128,92 +120,79 @@ java {
     }
 }
 
-minecraft {
-    if (mappings_channel == "parchment_previous") {
-        mappings channel: 'parchment', version: "${previous_minecraft_version}-${mappings_version}"
-    } else {
-        mappings channel: "${mappings_channel}", version: "${mappings_version}"
+legacyForge {
+    enable {
+        // NeoForge 1.20.1-47.1.76
+        forgeVersion = "${minecraft_version}-${forge_version}"
+        // Enable Minecraft dependencies for all relevant source sets
+        enabledSourceSets = [sourceSets.api, sourceSets.main, sourceSets.datagen, sourceSets.test] as Set
     }
 
-    accessTransformers.from(file('src/main/resources/META-INF/accesstransformer.cfg'))
+    // Parchment human-readable mappings
+    parchment {
+        minecraftVersion = parchment_minecraft_version
+        mappingsVersion = parchment_mappings_version
+    }
 
-    runs { runSpecContainer ->
+    accessTransformers.from(
+            file('src/main/resources/META-INF/accesstransformer.cfg')
+    )
+
+    runs {
         client {
-            setupRunConfig(it, true)
+            client()
+            systemProperty 'forge.enabledGameTestNamespaces', 'projecte'
+            systemProperty 'mixin.env.remapRefMap', 'true'
+            systemProperty 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
 
             //The below if statements are to add args to your gradle.properties file in user home
             // (DO NOT add them directly to the gradle.properties file for this project)
-            // Setting the below properties allows use of your normal Minecraft account in the
-            // dev environment including having your skin load. Each property also has a comment
-            // explaining what information to set the value to/format it expects
-            // One thing to note is because of the caching that goes on, after changing these
-            // variables, you need to refresh the project and rerun genIntellijRuns/genEclipseRuns
             if (project.hasProperty('mc_uuid')) {
-                //Your uuid without any dashes in the middle
-                args '--uuid', project.getProperty('mc_uuid')
+                programArgument '--uuid'
+                programArgument project.getProperty('mc_uuid')
             }
             if (project.hasProperty('mc_username')) {
-                //Your username/display name, this is the name that shows up in chat
-                // Note: This is not your email, even if you have a Mojang account
-                args '--username', project.getProperty('mc_username')
+                programArgument '--username'
+                programArgument project.getProperty('mc_username')
             }
             if (project.hasProperty('mc_accessToken')) {
-                //Your access token, you can find it in your '.minecraft/launcher_accounts.json' file
-                args '--accessToken', project.getProperty('mc_accessToken')
+                programArgument '--accessToken'
+                programArgument project.getProperty('mc_accessToken')
+            }
+            if (project.hasProperty('forge_force_ansi')) {
+                jvmArgument "-Dterminal.ansi=${project.getProperty('forge_force_ansi')}"
             }
         }
-        server { setupRunConfig(it, true) }
+
+        server {
+            server()
+            systemProperty 'forge.enabledGameTestNamespaces', 'projecte'
+            systemProperty 'mixin.env.remapRefMap', 'true'
+            systemProperty 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+            if (project.hasProperty('forge_force_ansi')) {
+                jvmArgument "-Dterminal.ansi=${project.getProperty('forge_force_ansi')}"
+            }
+        }
+
         data {
-            setupRunConfig(it, false)
-            environment 'target', 'fmluserdevdata'
-
-            args '--all', '--output', file('src/datagen/generated/'), '--mod', 'projecte',
-                    '--existing', file('src/main/resources/')
-
-            mods.named("projecte").configure { source((SourceSet) sourceSets.datagen) }
+            data()
+            programArguments.addAll '--all', '--output', file('src/datagen/generated/').absolutePath,
+                    '--mod', 'projecte', '--existing', file('src/main/resources/').absolutePath
         }
-        project.afterEvaluate {
-            def paths = new HashSet<String>()
-            libraryConfigs.each { config ->
-                config.copyRecursive().resolve().collect {
-                    it.absolutePath.toString()
-                }.each { path ->
-                    paths.add(path)
-                }
-            }
-            runSpecContainer.each { runSpec ->
-                runSpec.lazyToken('minecraft_classpath') {
-                    paths.join(File.pathSeparator)
-                }
-            }
+    }
+
+    mods {
+        projecte {
+            sourceSet sourceSets.api
+            sourceSet sourceSets.main
+            sourceSet sourceSets.datagen
         }
     }
 }
 
-def setupRunConfig(RunConfig runConfig, boolean supportsGameTests, String directory = "run") {
-    runConfig.workingDirectory(file(directory))
-    //This fixes Mixin application problems from other mods because their refMaps are SRG-based, but we're in a MCP env
-    runConfig.property 'mixin.env.remapRefMap', 'true'
-    runConfig.property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
-    if (supportsGameTests) {
-        //Specify all our mods as domains to look for game tests
-        runConfig.property 'forge.enabledGameTestNamespaces', 'projecte'
-    }
-
-    if (project.hasProperty('forge_force_ansi')) {
-        //Force ansi if declared as a gradle variable, as the auto detection doesn't detect IntelliJ properly
-        // or eclipse's plugin that adds support for ansi escape in console
-        runConfig.jvmArg("-Dterminal.ansi=${project.getProperty('forge_force_ansi')}")
-    }
-
-    runConfig.mods.register("projecte").configure {
-        sources((SourceSet[]) [sourceSets.main, sourceSets.api])
-    }
-
-    //if the selected toolchain is a JBR, enable DCEVM
-    if(project.javaToolchains.launcherFor(java.toolchain).map{it.metadata.vendor }.getOrElse("").contains("JetBrains")) {
-        runConfig.jvmArg("-XX:+AllowEnhancedClassRedefinition")
-    }
+obfuscation {
+    // Reobfuscate the shadow jar (universal jar with shadowed commons-math3) for distribution
+    reobfuscate(tasks.named('shadowJar'), sourceSets.main)
 }
 
 void exclusiveRepo(RepositoryHandler handler, String url, String... groups) {
@@ -224,13 +203,11 @@ void exclusiveRepo(RepositoryHandler handler, String url, String... groups) {
     })
 }
 
-//Note: This cannot be static so that fg.repository can be properly accessed
-@SuppressWarnings('GrMethodMayBeStatic')
 void exclusiveRepo(RepositoryHandler handler, String url, Consumer<InclusiveRepositoryContentDescriptor> filterSetup) {
     handler.exclusiveContent {
         it.forRepositories(handler.maven {
             setUrl(url)
-        }, fg.repository)//Add FG's repo so we make sure we are able to then find the mapped deps
+        })
         it.filter { f -> filterSetup.accept(f) }
     }
 }
@@ -252,48 +229,49 @@ test {
 }
 
 dependencies {
-    minecraft "net.neoforged:forge:${minecraft_version}-${forge_version}"
-
     testImplementation "org.junit.jupiter:junit-jupiter-api:${junit_version}"
     testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:${junit_version}"
 
-    compileOnly fg.deobf("mezz.jei:jei-${minecraft_version}-common-api:${jei_version}")
-    compileOnly fg.deobf("mezz.jei:jei-${minecraft_version}-forge-api:${jei_version}")
-    runtimeOnly fg.deobf("mezz.jei:jei-${minecraft_version}-forge:${jei_version}")
+    modCompileOnly "mezz.jei:jei-${minecraft_version}-common-api:${jei_version}"
+    modCompileOnly "mezz.jei:jei-${minecraft_version}-forge-api:${jei_version}"
+    modRuntimeOnly "mezz.jei:jei-${minecraft_version}-forge:${jei_version}"
 
-    compileOnly fg.deobf("top.theillusivec4.curios:curios-forge:${curios_version}:api")
-    runtimeOnly fg.deobf("top.theillusivec4.curios:curios-forge:${curios_version}")
+    modCompileOnly "top.theillusivec4.curios:curios-forge:${curios_version}:api"
+    modRuntimeOnly "top.theillusivec4.curios:curios-forge:${curios_version}"
 
     //TODO: Remove having to specify these as non transitive once https://github.com/McJtyMods/TheOneProbe/issues/548 is fixed
-    compileOnly fg.deobf("mcjty.theoneprobe:theoneprobe:${top_version}:api") {
+    modCompileOnly("mcjty.theoneprobe:theoneprobe:${top_version}:api") {
         transitive = false
     }
-    runtimeOnly fg.deobf("mcjty.theoneprobe:theoneprobe:${top_version}") {
+    modRuntimeOnly("mcjty.theoneprobe:theoneprobe:${top_version}") {
         transitive = false
     }
-    compileOnly fg.deobf("curse.maven:jade-api-324717:${jade_api_id}")
-    runtimeOnly fg.deobf("curse.maven:jade-324717:${jade_id}")
-    compileOnly fg.deobf("mcp.mobius.waila:wthit-api:forge-${wthit_version}")
+    modCompileOnly "curse.maven:jade-api-324717:${jade_api_id}"
+    modRuntimeOnly "curse.maven:jade-324717:${jade_id}"
+    modCompileOnly "mcp.mobius.waila:wthit-api:forge-${wthit_version}"
 
-    implementation fg.deobf("com.blamejared.crafttweaker:CraftTweaker-forge-${minecraft_version}:${crafttweaker_version}")
+    def crt = "com.blamejared.crafttweaker:CraftTweaker-forge-${minecraft_version}:${crafttweaker_version}"
+    modCompileOnly crt
+    modRuntimeOnly crt
 
-    forgeLibrary group: "org.apache.commons", name: "commons-math3", version: "3.6.1"
+    additionalRuntimeClasspath(implementation(shadow(group: 'org.apache.commons', name: 'commons-math3', version: '3.6.1')))
 }
 
 //Set the various variables/settings for the different process resources tasks
-processResources {
-    duplicatesStrategy(DuplicatesStrategy.FAIL)
+tasks.named('processResources', ProcessResources) {
+    duplicatesStrategy = DuplicatesStrategy.FAIL
     exclude('META-INF/mods.toml')
-    configure { finalizedBy(replaceResources) }
+    finalizedBy(replaceResources)
+    def files = fileTree(dir: outputs.files.asPath, includes: jsonPatterns)
     doLast {
-        fileTree(dir: getOutputs().getFiles().getAsPath(), includes: jsonPatterns).each {
-            File file -> file.setText(JsonOutput.toJson(new JsonSlurper().parse(file)))
+        for (def file : files) {
+            file.text = JsonOutput.toJson(new JsonSlurper().parse(file))
         }
     }
 }
 
 //Make the various classes tasks depend on the corresponding replaceResources tasks in addition to the default processResources tasks they depend on
-classes.configure { dependsOn(replaceResources) }
+tasks.named('classes') { dependsOn(replaceResources) }
 
 def getManifestAttributes() {
     return [
@@ -308,50 +286,36 @@ def getManifestAttributes() {
     ]
 }
 
-jar {
-    duplicatesStrategy(DuplicatesStrategy.FAIL)
+tasks.named('jar', Jar) {
+    duplicatesStrategy = DuplicatesStrategy.FAIL
     from([sourceSets.api.output, sourceSets.main.output])
     manifest.attributes(getManifestAttributes())
-    afterEvaluate { finalizedBy reobfJar }
+    finalizedBy(shadowJar)
 }
 
-task apiJar(type: Jar) {
-    duplicatesStrategy(DuplicatesStrategy.FAIL)
+def apiJar = tasks.register('apiJar', Jar) {
+    duplicatesStrategy = DuplicatesStrategy.FAIL
     archiveClassifier.set("api")
-    from sourceSets.api.output
+    from(sourceSets.api.output)
     manifest.attributes(getManifestAttributes())
-    afterEvaluate { finalizedBy reobfApiJar }
 }
 
-shadowJar {
+def shadowJar = tasks.named('shadowJar', ShadowJar) {
     //Note: We use the include duplicate strategy instead of FAIL as minimize causes
     // the things to get "added" twice but it is filtered separately by the shadow
     // plugin anyways
-    duplicatesStrategy(DuplicatesStrategy.INCLUDE)
-    archiveClassifier.set("universal") // Replace the default JAR
-    dependsOn(classes, apiClasses)
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    archiveClassifier.set('') // Replace the default JAR
     from([sourceSets.api.output, sourceSets.main.output])
 
-    // Only shadow apache commons-math3
-    dependencies {
-        include dependency('org.apache.commons:commons-math3:.*')
-    }
+    configurations = [project.configurations.shadow]
     exclude('assets/org/**')
     exclude('META-INF/maven/**')
     exclude('META-INF/*.txt')
     // Relocate apache commons-math3 to prevent conflicts with other mods that include it
-    relocate 'org.apache.commons.math3', 'moze_intel.projecte.shaded.org.apache.commons.math3'
+    relocate('org.apache.commons.math3', 'moze_intel.projecte.shaded.org.apache.commons.math3')
     // Minimize the required files so we only include what is needed
-    minimize {
-        include dependency('org.apache.commons:commons-math3:.*')
-    }
-    afterEvaluate { finalizedBy reobfShadowJar }
-}
-
-reobf {
-    shadowJar {}
-    apiJar { libraries.from(sourceSets.api.compileClasspath) }
-    jar { libraries.from(sourceSets.main.compileClasspath) }
+    minimize()
 }
 
 tasks.register('updateJSON') {
@@ -370,10 +334,31 @@ tasks.register('updateJSON') {
 }
 
 tasks.withType(JavaCompile).configureEach({
-    it.options.encoding = 'UTF-8'
-    it.options.compilerArgs.addAll(["-Xmaxerrs", "100000"])
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['-Xmaxerrs', '100000'])
+})
+
+tasks.withType(Javadoc).configureEach({
+    options.encoding = 'UTF-8'
+    options.tags = [
+            'apiNote:a:<em>API Note:</em>',
+            'implSpec:a:<em>Implementation Requirements:</em>',
+            'implNote:a:<em>Implementation Note:</em>'
+    ]
 })
 
 artifacts {
-    archives apiJar
+    archives(apiJar)
+    archives(shadowJar)
+}
+
+publishing {
+    publications { PublicationContainer publicationContainer ->
+        shadow(MavenPublication) { MavenPublication publication ->
+            publication.groupId = project.group
+            publication.version = project.version
+            publication.artifactId = 'ProjectE'
+            publication.artifacts = [apiJar, shadowJar]
+        }
+    }
 }
