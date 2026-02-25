@@ -1,7 +1,14 @@
 package moze_intel.projecte.gameObjs.block_entities;
 
 import java.util.Optional;
+
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Range;
+
+import moze_intel.projecte.api.block_entity.IBatchTickableBlockEntity;
 import moze_intel.projecte.api.capabilities.PECapabilities;
+import moze_intel.projecte.api.capabilities.block_entity.IEmcStorage.EmcAction;
 import moze_intel.projecte.api.capabilities.item.IItemEmcHolder;
 import moze_intel.projecte.capability.managing.BasicCapabilityResolver;
 import moze_intel.projecte.capability.managing.ICapabilityResolver;
@@ -36,11 +43,8 @@ import net.minecraftforge.items.ItemHandlerHelper;
 import net.minecraftforge.items.ItemStackHandler;
 import net.minecraftforge.items.wrapper.CombinedInvWrapper;
 import net.minecraftforge.items.wrapper.RangedWrapper;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
-import org.jetbrains.annotations.Range;
 
-public class CollectorMK1BlockEntity extends CapabilityEmcBlockEntity implements MenuProvider {
+public class CollectorMK1BlockEntity extends CapabilityEmcBlockEntity implements MenuProvider, IBatchTickableBlockEntity {
 
 	private final ItemStackHandler input = new StackHandler(getInvSize()) {
 		@Override
@@ -130,6 +134,28 @@ public class CollectorMK1BlockEntity extends CapabilityEmcBlockEntity implements
 		collector.updateComparators();
 	}
 
+	// Update: add batchTick logic to prevent too much useless calculation
+	@Override
+	public void batchTick(int ticks) {
+		if (needsCompacting) {
+			ItemHelper.compactInventory(toSort);
+			needsCompacting = false;
+		}
+		checkFuelOrKlein();
+
+		accelerateUnprocessedEmc(ticks);
+		if (hasChargeableItem) {
+			upgradeChargeableItem();
+		} else if (hasFuel) {
+			upgradeFuel();
+		} else {
+			sendEmc();
+		}
+
+		rotateUpgraded();
+		updateComparators();
+	}
+
 	private void rotateUpgraded() {
 		ItemStack upgraded = getUpgraded();
 		if (!upgraded.isEmpty()) {
@@ -161,8 +187,22 @@ public class CollectorMK1BlockEntity extends CapabilityEmcBlockEntity implements
 	}
 
 	private void updateEmc() {
+		accelerateUnprocessedEmc(1);
+
+		if (this.getStoredEmc() > 0) {
+			if (hasChargeableItem) {
+				upgradeChargeableItem();
+			} else if (hasFuel) {
+				upgradeFuel();
+			} else {
+				sendEmc();
+			}
+		}
+	}
+
+	private void accelerateUnprocessedEmc(int times) {
 		if (!this.hasMaxedEmc()) {
-			unprocessedEMC += emcGen * (getSunLevel() / 320.0f);
+			unprocessedEMC += times * emcGen * (getSunLevel() / 320.0f);
 			if (unprocessedEMC >= 1) {
 				//Force add the EMC regardless of if we can receive EMC from external sources
 				unprocessedEMC -= forceInsertEmc((long) unprocessedEMC, EmcAction.EXECUTE);
@@ -170,44 +210,47 @@ public class CollectorMK1BlockEntity extends CapabilityEmcBlockEntity implements
 			//Note: We don't need to recheck comparators because it doesn't take the unprocessed emc into account
 			markDirty(false);
 		}
+	}
 
-		if (this.getStoredEmc() > 0) {
-			ItemStack upgrading = getUpgrading();
-			if (hasChargeableItem) {
-				upgrading.getCapability(PECapabilities.EMC_HOLDER_ITEM_CAPABILITY).ifPresent(emcHolder -> {
-					long actualInserted = emcHolder.insertEmc(upgrading, Math.min(getStoredEmc(), emcGen), EmcAction.EXECUTE);
-					forceExtractEmc(actualInserted, EmcAction.EXECUTE);
-				});
-			} else if (hasFuel) {
-				if (FuelMapper.getFuelUpgrade(upgrading).isEmpty()) {
-					auxSlots.setStackInSlot(UPGRADING_SLOT, ItemStack.EMPTY);
-				}
+	private void upgradeChargeableItem() {
+		ItemStack upgrading = getUpgrading();
+		upgrading.getCapability(PECapabilities.EMC_HOLDER_ITEM_CAPABILITY).ifPresent(emcHolder -> {
+			long actualInserted = emcHolder.insertEmc(upgrading, Math.min(getStoredEmc(), emcGen), EmcAction.EXECUTE);
+			forceExtractEmc(actualInserted, EmcAction.EXECUTE);
+		});
+	}
 
-				ItemStack result = getLock().isEmpty() ? FuelMapper.getFuelUpgrade(upgrading) : getLock().copy();
+	private void upgradeFuel() {
+		ItemStack upgrading = getUpgrading();
+		if (FuelMapper.getFuelUpgrade(upgrading).isEmpty()) {
+			auxSlots.setStackInSlot(UPGRADING_SLOT, ItemStack.EMPTY);
+		}
 
-				long upgradeCost = EMCHelper.getEmcValue(result) - EMCHelper.getEmcValue(upgrading);
+		ItemStack result = getLock().isEmpty() ? FuelMapper.getFuelUpgrade(upgrading) : getLock().copy();
 
-				if (upgradeCost >= 0 && this.getStoredEmc() >= upgradeCost) {
-					ItemStack upgrade = getUpgraded();
+		long upgradeCost = EMCHelper.getEmcValue(result) - EMCHelper.getEmcValue(upgrading);
 
-					if (getUpgraded().isEmpty()) {
-						forceExtractEmc(upgradeCost, EmcAction.EXECUTE);
-						auxSlots.setStackInSlot(UPGRADE_SLOT, result);
-						upgrading.shrink(1);
-					} else if (result.getItem() == upgrade.getItem() && upgrade.getCount() < upgrade.getMaxStackSize()) {
-						forceExtractEmc(upgradeCost, EmcAction.EXECUTE);
-						getUpgraded().grow(1);
-						upgrading.shrink(1);
-						auxSlots.onContentsChanged(UPGRADE_SLOT);
-					}
-				}
-			} else {
-				//Only send EMC when we are not upgrading fuel or charging an item
-				long toSend = this.getStoredEmc() < emcGen ? this.getStoredEmc() : emcGen;
-				this.sendToAllAcceptors(toSend);
-				this.sendRelayBonus();
+		if (upgradeCost >= 0 && this.getStoredEmc() >= upgradeCost) {
+			ItemStack upgrade = getUpgraded();
+
+			if (getUpgraded().isEmpty()) {
+				forceExtractEmc(upgradeCost, EmcAction.EXECUTE);
+				auxSlots.setStackInSlot(UPGRADE_SLOT, result);
+				upgrading.shrink(1);
+			} else if (result.getItem() == upgrade.getItem() && upgrade.getCount() < upgrade.getMaxStackSize()) {
+				forceExtractEmc(upgradeCost, EmcAction.EXECUTE);
+				getUpgraded().grow(1);
+				upgrading.shrink(1);
+				auxSlots.onContentsChanged(UPGRADE_SLOT);
 			}
 		}
+	}
+
+	private void sendEmc() {
+		//Only send EMC when we are not upgrading fuel or charging an item
+		long toSend = this.getStoredEmc() < emcGen ? this.getStoredEmc() : emcGen;
+		this.sendToAllAcceptors(toSend);
+		this.sendRelayBonus();
 	}
 
 	@Range(from = 0, to = Long.MAX_VALUE)

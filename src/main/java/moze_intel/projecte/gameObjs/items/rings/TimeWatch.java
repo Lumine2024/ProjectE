@@ -2,9 +2,11 @@ package moze_intel.projecte.gameObjs.items.rings;
 
 import java.util.ArrayList;
 import java.util.List;
+import moze_intel.projecte.api.block_entity.IBatchTickableBlockEntity;
 import moze_intel.projecte.api.block_entity.IDMPedestal;
 import moze_intel.projecte.api.capabilities.item.IItemCharge;
 import moze_intel.projecte.api.capabilities.item.IPedestalItem;
+import moze_intel.projecte.gameObjs.block_entities.CollectorMK1BlockEntity;
 import moze_intel.projecte.capability.ChargeItemCapabilityWrapper;
 import moze_intel.projecte.capability.PedestalItemCapabilityWrapper;
 import moze_intel.projecte.config.ProjectEConfig;
@@ -133,30 +135,38 @@ public class TimeWatch extends PEToggleItem implements IPedestalItem, IItemCharg
 			return;
 		}
 		for (BlockEntity blockEntity : WorldHelper.getBlockEntitiesWithinAABB(level, bBox)) {
+			/*
+			 * preliminary optimization: Update Collectors and Condensers only once in one tick for each block
+			 * expected 18x faster than old one
+			 */
 			if (!blockEntity.isRemoved() && !BlockEntities.BLACKLIST_TIME_WATCH_LOOKUP.contains(blockEntity.getType())) {
 				BlockPos pos = blockEntity.getBlockPos();
 				if (level.shouldTickBlocksAt(ChunkPos.asLong(pos))) {
 					LevelChunk chunk = level.getChunkAt(pos);
-					RebindableTickingBlockEntityWrapper tickingWrapper = chunk.tickersInLevel.get(pos);
-					if (tickingWrapper != null && !tickingWrapper.isRemoved()) {
-						if (tickingWrapper.ticker instanceof BoundTickingBlockEntity tickingBE) {
-							//In general this should always be the case, so we inline some of the logic
-							// to optimize the calls to try and make extra ticks as cheap as possible
-							if (chunk.isTicking(pos)) {
-								ProfilerFiller profiler = level.getProfiler();
-								profiler.push(tickingWrapper::getType);
-								BlockState state = chunk.getBlockState(pos);
-								if (blockEntity.getType().isValid(state)) {
-									for (int i = 0; i < bonusTicks; i++) {
-										tickingBE.ticker.tick(level, pos, state, blockEntity);
+					if (chunk.isTicking(pos)) {
+						BlockState state = chunk.getBlockState(pos);
+						if (blockEntity.getType().isValid(state)) {
+							if (blockEntity instanceof IBatchTickableBlockEntity batchTickableBlockEntity) {
+								batchTickableBlockEntity.batchTick(bonusTicks);
+							} else {
+								RebindableTickingBlockEntityWrapper tickingWrapper = chunk.tickersInLevel.get(pos);
+								if (tickingWrapper != null && !tickingWrapper.isRemoved()) {
+									if (tickingWrapper.ticker instanceof BoundTickingBlockEntity tickingBE) {
+										//In general this should always be the case, so we inline some of the logic
+										// to optimize the calls to try and make extra ticks as cheap as possible
+										ProfilerFiller profiler = level.getProfiler();
+										profiler.push(tickingWrapper::getType);
+										for (int i = 0; i < bonusTicks; i++) {
+											tickingBE.ticker.tick(level, pos, state, blockEntity);
+										}
+										profiler.pop();
+									} else {
+										//Fallback to just trying to make it tick extra
+										for (int i = 0; i < bonusTicks; i++) {
+											tickingWrapper.tick();
+										}
 									}
 								}
-								profiler.pop();
-							}
-						} else {
-							//Fallback to just trying to make it tick extra
-							for (int i = 0; i < bonusTicks; i++) {
-								tickingWrapper.tick();
 							}
 						}
 					}

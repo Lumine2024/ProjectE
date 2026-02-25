@@ -1,5 +1,6 @@
 package moze_intel.projecte.gameObjs.block_entities;
 
+import moze_intel.projecte.api.block_entity.IBatchTickableBlockEntity;
 import moze_intel.projecte.api.ItemInfo;
 import moze_intel.projecte.api.event.PlayerAttemptCondenserSetEvent;
 import moze_intel.projecte.capability.managing.BasicCapabilityResolver;
@@ -28,7 +29,7 @@ import net.minecraftforge.items.ItemStackHandler;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-public class CondenserBlockEntity extends EmcChestBlockEntity {
+public class CondenserBlockEntity extends EmcChestBlockEntity implements IBatchTickableBlockEntity {
 
 	protected final ItemStackHandler inputInventory = createInput();
 	private final ItemStackHandler outputInventory = createOutput();
@@ -111,6 +112,16 @@ public class CondenserBlockEntity extends EmcChestBlockEntity {
 			condenser.condense();
 		}
 		condenser.updateComparators();
+	}
+
+	@Override
+	public void batchTick(int ticks) {
+		checkLockAndUpdate(false);
+		displayEmc = getStoredEmc();
+		if (getLockInfo() != null) {
+			condense();
+		}
+		updateComparators();
 	}
 
 	private void checkLockAndUpdate(boolean force) {
